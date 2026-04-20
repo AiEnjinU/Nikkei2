@@ -1,0 +1,708 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<title>NIKKEI 225 / Orbital Structure</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box;}
+html,body{width:100%;height:100%;background:#fafaf7;font-family:'Courier New',monospace;overflow:hidden;}
+:root{
+  --font-mono:'Courier New',monospace;
+  --border-radius-lg:0;
+}
+
+/* J-Quants login overlay */
+#login{
+  position:fixed;z-index:100;top:50%;left:50%;transform:translate(-50%,-50%);
+  background:rgba(255,255,255,0.98);border:0.5px solid #aaa;
+  padding:36px 40px;width:400px;
+  box-shadow:0 8px 40px rgba(0,0,0,0.08);
+}
+#login h2{font-size:11px;color:#333;letter-spacing:0.28em;margin-bottom:6px;font-weight:400;}
+#login p{font-size:11px;color:#666;letter-spacing:0.04em;margin-bottom:24px;line-height:1.8;font-family:sans-serif;}
+#login label{display:block;font-size:9px;color:#666;letter-spacing:0.2em;margin-bottom:7px;}
+#login input{
+  display:block;width:100%;background:#fafaf7;border:0.5px solid #ccc;
+  color:#222;font-family:var(--font-mono);font-size:12px;padding:11px 14px;
+  margin-bottom:14px;outline:none;letter-spacing:0.06em;transition:border-color 0.2s;
+}
+#login input::placeholder{color:#bbb;}
+#login input:focus{border-color:#666;}
+#login button{
+  width:100%;background:#fafaf7;border:0.5px solid #666;color:#333;
+  font-family:var(--font-mono);font-size:10px;letter-spacing:0.22em;
+  padding:12px;cursor:pointer;transition:all 0.2s;margin-top:4px;
+}
+#login button:hover{border-color:#222;color:#000;background:#f0f0ea;}
+#err{font-size:10px;color:#a04040;letter-spacing:0.04em;margin-top:12px;min-height:16px;line-height:1.7;font-family:sans-serif;}
+#skip{font-size:10px;color:#999;letter-spacing:0.12em;margin-top:18px;cursor:pointer;text-align:center;border-top:0.5px solid #ddd;padding-top:16px;display:block;transition:color 0.2s;}
+#skip:hover{color:#333;}
+.login-note{font-size:10px;color:#888;letter-spacing:0.02em;margin-top:-6px;margin-bottom:16px;line-height:1.6;font-family:sans-serif;}
+.login-note a{color:#555;text-decoration:underline;}
+</style>
+</head>
+<body>
+
+<div id="login">
+  <h2>NIKKEI 225</h2>
+  <p>J-Quantsのデータに接続します。ブラウザでは自動で接続、失敗時はデモモードで起動可能です。</p>
+  <button id="loginBtn">CONNECT</button>
+  <div id="err"></div>
+  <div id="debug" style="font-size:9px;color:#666;margin-top:10px;font-family:monospace;line-height:1.5;max-height:120px;overflow-y:auto;background:#f5f5f0;padding:8px;display:none;"></div>
+  <div id="skip">デモモードで起動</div>
+</div>
+
+<div id="wrap" style="width:100vw;height:100vh;background:#fafaf7;overflow:hidden;position:relative;font-family:var(--font-mono);">
+<div style="position:absolute;top:12px;left:16px;z-index:10;font-size:10px;color:#333;letter-spacing:0.1em;">NIKKEI 225 / ORBITAL STRUCTURE</div>
+<div style="position:absolute;top:12px;right:16px;z-index:10;font-size:10px;color:#333;text-align:right;">
+<div id="idx-val">loading...</div>
+<div id="idx-chg" style="font-size:9px;color:#666;">—</div>
+<div id="mode-indicator" style="font-size:8px;color:#888;letter-spacing:0.18em;margin-top:4px;">SIMULATION</div>
+</div>
+<div style="position:absolute;bottom:12px;left:16px;z-index:10;font-size:9px;color:#666;line-height:1.6;">
+<div>drag · scroll · hover</div>
+<div id="audio-status" style="cursor:pointer;text-decoration:underline;">♪ click to enable sound</div>
+</div>
+<div id="event-log" style="position:absolute;bottom:12px;right:16px;z-index:10;font-size:9px;color:#666;text-align:right;">— market stable —</div>
+<canvas id="cv" style="display:block;width:100%;height:100%;cursor:grab;"></canvas>
+<div id="tip" style="position:absolute;pointer-events:none;background:rgba(255,255,255,0.95);border:0.5px solid #999;padding:6px 10px;font-size:10px;color:#111;display:none;z-index:20;line-height:1.5;"></div>
+</div>
+
+<script>
+// ========== J-Quants API (Vercel Serverless Function経由) ==========
+// /api/jquants がプロキシ。APIキーはVercel環境変数JQUANTS_API_KEYで管理。
+let isLiveMode=false;
+const API_PROXY='/api/jquants';
+const debugEl=document.getElementById('debug');
+
+function debug(msg){
+  if(!debugEl)return;
+  debugEl.style.display='block';
+  const ts=new Date().toLocaleTimeString('ja-JP');
+  debugEl.innerHTML+=ts+' '+msg+'<br>';
+  debugEl.scrollTop=debugEl.scrollHeight;
+  console.log('[JQ]',msg);
+}
+
+async function fetchLivePrices(){
+  const now=new Date();
+  const target=new Date(now.getTime()-12*7*86400000-3*86400000);
+  for(let i=0;i<10;i++){
+    const d=new Date(target.getTime()-i*86400000);
+    const wday=d.getDay();
+    if(wday===0||wday===6)continue;
+    const ymd=d.toISOString().slice(0,10).replace(/-/g,'');
+    debug('Fetching '+ymd+' ...');
+    try{
+      const params=new URLSearchParams({path:'/v1/prices/daily_quotes',date:ymd});
+      const r=await fetch(API_PROXY+'?'+params.toString());
+      if(r.status===500){
+        const j=await r.json();
+        debug('  → server error: '+(j.error||'unknown'));
+        if(j.hint){debug('  → hint: '+j.hint);}
+        throw new Error(j.error||'Server error');
+      }
+      if(r.status===401||r.status===403){
+        debug('  → '+r.status+' auth error');
+        throw new Error('API key invalid or expired (HTTP '+r.status+')');
+      }
+      if(!r.ok){
+        debug('  → HTTP '+r.status);
+        continue;
+      }
+      const data=await r.json();
+      if(data.daily_quotes&&data.daily_quotes.length>0){
+        debug('  → got '+data.daily_quotes.length+' quotes');
+        return {date:ymd,quotes:data.daily_quotes};
+      }
+      debug('  → 0 quotes, trying previous day');
+    }catch(e){
+      debug('  → fetch error: '+e.message);
+      if(e.message.includes('invalid')||e.message.includes('Server'))throw e;
+      continue;
+    }
+  }
+  return null;
+}
+
+window._applyLiveData=null;
+
+document.getElementById('loginBtn').addEventListener('click',async()=>{
+  const err=document.getElementById('err'),btn=document.getElementById('loginBtn');
+  btn.textContent='CONNECTING...';err.textContent='';
+  debugEl.innerHTML='';
+  try{
+    const q=await fetchLivePrices();
+    if(!q||!q.quotes||!q.quotes.length){
+      throw new Error('データ取得失敗');
+    }
+    isLiveMode=true;
+    document.getElementById('login').style.display='none';
+    if(window._applyLiveData)window._applyLiveData(q);
+    setInterval(async()=>{
+      try{
+        const q=await fetchLivePrices();
+        if(q&&window._applyLiveData)window._applyLiveData(q);
+      }catch(e){console.error(e);}
+    },3600000);
+  }catch(e){
+    err.innerHTML=e.message;
+    btn.textContent='CONNECT';
+  }
+});
+
+document.getElementById('skip').addEventListener('click',()=>{
+  document.getElementById('login').style.display='none';
+  document.getElementById('mode-indicator').textContent='SIMULATION';
+});
+
+// ========== 元v3のシミュレーション本体（平均回帰を追加修正） ==========
+(function(){
+function init(){
+const wrap=document.getElementById('wrap');
+const cv=document.getElementById('cv');
+if(!cv||!wrap){setTimeout(init,50);return;}
+const ctx=cv.getContext('2d');
+const tip=document.getElementById('tip');
+const idxVal=document.getElementById('idx-val');
+const idxChg=document.getElementById('idx-chg');
+const evLog=document.getElementById('event-log');
+const modeInd=document.getElementById('mode-indicator');
+const audioBtn=document.getElementById('audio-status');
+let W=800,H=640,DPR=window.devicePixelRatio||1;
+
+function resize(){
+  const r=wrap.getBoundingClientRect();
+  W=Math.max(r.width,400);
+  H=Math.max(r.height,400);
+  cv.width=W*DPR;cv.height=H*DPR;
+  cv.style.width=W+'px';cv.style.height=H+'px';
+  ctx.setTransform(DPR,0,0,DPR,0,0);
+}
+resize();
+setTimeout(resize,100);
+setTimeout(resize,500);
+window.addEventListener('resize',resize);
+
+// === AUDIO ===
+let audioCtx=null,audioEnabled=false,masterGain=null;
+function enableAudio(){
+  if(audioEnabled) return;
+  try{
+    audioCtx=new (window.AudioContext||window.webkitAudioContext)();
+    masterGain=audioCtx.createGain();
+    masterGain.gain.value=0.15;
+    masterGain.connect(audioCtx.destination);
+    audioEnabled=true;
+    audioBtn.textContent='♪ sound on';
+    audioBtn.style.color='#111';
+  }catch(e){audioBtn.textContent='♪ audio unavailable';}
+}
+audioBtn.addEventListener('click',enableAudio);
+
+function playClick(pitch,vol){
+  if(!audioEnabled||!audioCtx) return;
+  const now=audioCtx.currentTime;
+  const osc=audioCtx.createOscillator();
+  const g=audioCtx.createGain();
+  osc.type='sine';
+  osc.frequency.setValueAtTime(pitch,now);
+  osc.frequency.exponentialRampToValueAtTime(pitch*0.5,now+0.04);
+  g.gain.setValueAtTime(0,now);
+  g.gain.linearRampToValueAtTime(vol,now+0.002);
+  g.gain.exponentialRampToValueAtTime(0.0001,now+0.06);
+  osc.connect(g);g.connect(masterGain);
+  osc.start(now);osc.stop(now+0.08);
+  const bufSize=audioCtx.sampleRate*0.02;
+  const buf=audioCtx.createBuffer(1,bufSize,audioCtx.sampleRate);
+  const d=buf.getChannelData(0);
+  for(let i=0;i<bufSize;i++) d[i]=(Math.random()*2-1)*Math.pow(1-i/bufSize,3);
+  const noise=audioCtx.createBufferSource();
+  const ng=audioCtx.createGain();
+  ng.gain.value=vol*0.3;
+  noise.buffer=buf;
+  noise.connect(ng);ng.connect(masterGain);
+  noise.start(now);
+}
+
+function playShock(){
+  if(!audioEnabled||!audioCtx) return;
+  const now=audioCtx.currentTime;
+  const osc=audioCtx.createOscillator();
+  const g=audioCtx.createGain();
+  osc.type='sine';
+  osc.frequency.setValueAtTime(80,now);
+  osc.frequency.exponentialRampToValueAtTime(30,now+0.6);
+  g.gain.setValueAtTime(0,now);
+  g.gain.linearRampToValueAtTime(0.4,now+0.05);
+  g.gain.exponentialRampToValueAtTime(0.001,now+0.8);
+  osc.connect(g);g.connect(masterGain);
+  osc.start(now);osc.stop(now+0.9);
+}
+
+const SECTORS=[
+ {name:'Technology',tilt:-0.35,count:45},
+ {name:'Financial',tilt:0.28,count:35},
+ {name:'Automotive',tilt:-0.15,count:30},
+ {name:'Consumer',tilt:0.45,count:45},
+ {name:'Industrial',tilt:-0.55,count:40},
+ {name:'Pharma/Other',tilt:0.12,count:30}
+];
+const NAMES_BY_SECTOR=[
+  ['ソニーG','任天堂','キーエンス','東京エレクトロン','村田製作所','ルネサス','アドバンテスト','日立','富士通','NEC','TDK','京セラ','ローム','オムロン','パナソニック','シャープ','富士フイルム','リコー','コニカミノルタ','オリンパス','セイコー','カシオ','ブラザー','横河電機','安川電機','SCREEN','ディスコ','スクリンHD','日本電産','ミネベア','アルプス','太陽誘電','新光電気','ヤマハ発','島津','堀場','三菱電機','東芝','ソフトバンクG','KDDI','NTT','NTTデータ','楽天','メルカリ','リクルート'],
+  ['三菱UFJ','三井住友FG','みずほFG','野村HD','大和証券','第一生命','東京海上','MS&AD','SOMPO','りそなHD','新生銀行','千葉銀行','静岡銀行','福岡FG','京都銀行','住友生命','明治安田','日本生命','オリックス','ジャックス','アイフル','クレセゾン','イオンFS','アコム','SBI','マネックス','松井証券','岡三証券','東海東京','東京都民','ほくほくFG','西日本FH','山口FG','三井住友T','りそな銀行'],
+  ['トヨタ','ホンダ','日産','スズキ','SUBARU','マツダ','三菱自動車','いすゞ','日野','デンソー','アイシン','ブリヂストン','住友ゴム','横浜ゴム','豊田自動織機','豊田合成','ジェイテクト','NGK','曙ブレーキ','カヤバ','武蔵精密','ヨロズ','河西工業','プレス工業','ショーワ','エクセディ','フタバ産業','トピー','ユタカ技研','小糸製作所'],
+  ['ファーストリテイリング','ユニクロ','しまむら','ニトリ','無印良品','セブン&アイ','ローソン','ファミマ','イオン','高島屋','三越伊勢丹','大丸松坂屋','丸井','Jフロント','J.フロント','良品計画','ABCマート','ZOZO','ZOZOタウン','アイフル','スターバックス','日本マック','モスバーガー','すかいらーく','吉野家','ゼンショー','コロワイド','ドトール','コメダ','鳥貴族','餃子の王将','サイゼリヤ','くら寿司','スシロー','王将フード','ロイヤルHD','ブロンコビリー','ジョイフル','ワタミ','カルビー','亀田製菓','ハウス食品','味の素','キッコーマン','キユーピー'],
+  ['三菱重工','川崎重工','IHI','三井E&S','日立建機','コマツ','クボタ','ダイキン','日立造船','神戸製鋼','JFE','日本製鉄','三井金属','住友金属','DOWA','古河電工','フジクラ','住友電工','三菱マテリアル','大阪チタニウム','東邦チタニウム','日本特殊陶業','TOTO','LIXIL','大成建設','鹿島建設','清水建設','大林組','竹中工務店','熊谷組','戸田建設','西松建設','奥村組','東洋建設','ペンタ','東亜建設','フジタ','前田建設','大豊建設','日本国土'],
+  ['武田薬品','アステラス','第一三共','エーザイ','中外製薬','大塚HD','小野薬品','大日本住友','協和キリン','塩野義','参天製薬','ロート製薬','持田製薬','ツムラ','久光製薬','大正製薬','カネカ','花王','資生堂','コーセー','ポーラ','ライオン','ユニ・チャーム','小林製薬','ピジョン','ピップ','マンダム','ミルボン','ファンケル','DHC']
+];
+const PRICES_RANGE=[[3000,28000],[800,12000],[1500,18000],[2000,45000],[1800,25000],[2500,30000]];
+
+// セクター別日次ボラティリティ
+const SEC_SIGMA=[0.022,0.016,0.018,0.015,0.017,0.013];
+
+const stocks=[];
+let sidx=0;
+SECTORS.forEach((sec,si)=>{
+  const names=NAMES_BY_SECTOR[si];
+  const [pMin,pMax]=PRICES_RANGE[si];
+  for(let i=0;i<sec.count;i++){
+    const rankInSector=i/sec.count;
+    const radius=140+rankInSector*180+si*6;
+    const s={
+      sector:si,
+      name:names[i%names.length],
+      code:(1000+(sidx*17)%8999).toString().padStart(4,'0'),
+      radius:radius,
+      baseRadius:radius,
+      angle:Math.random()*Math.PI*2,
+      // 公転速度を10分の1に（微振動 → ゆっくり浮遊）
+      speed:(0.00006+Math.random()*0.0001)*(si%2===0?1:-1),
+      price:pMin+Math.random()*(pMax-pMin),
+      basePrice:0,
+      anchorPrice:0,  // ★ 平均回帰のアンカー
+      change:0,
+      lastChange:0,
+      size:1.2+Math.random()*2,
+      flashTimer:0,
+      sigma:SEC_SIGMA[si],
+      // ★ 浮遊アニメーション用パラメータ（低周波・大振幅）
+      // 3つの独立した正弦波を重ね合わせて、規則性のないゆらぎを作る
+      fA:Math.random()*Math.PI*2,
+      fB:Math.random()*Math.PI*2,
+      fC:Math.random()*Math.PI*2,
+      // 周期: 数秒〜十数秒。tick(16ms)で0.0005 → 周期約25秒
+      fSpeedA:0.0003+Math.random()*0.0004,
+      fSpeedB:0.0002+Math.random()*0.0003,
+      fSpeedC:0.00015+Math.random()*0.00025,
+      // 半径方向の浮遊振幅 (±10〜25 pixels)
+      fRadAmp:10+Math.random()*15,
+      // 角度方向の浮遊振幅 (±0.05〜0.12 rad)
+      fAngAmp:0.05+Math.random()*0.07,
+      // 傾き方向の浮遊振幅 (上下に漂う)
+      fTiltAmp:0.03+Math.random()*0.06
+    };
+    s.basePrice=s.price;
+    s.anchorPrice=s.price;  // 初期価格をアンカーに
+    stocks.push(s);
+    sidx++;
+  }
+});
+
+let indexBase=38500,indexValue=38500,indexChange=0;
+let rotX=-0.45,rotY=0.3,zoom=1;
+let targetRotX=-0.45,targetRotY=0.3;
+let dragging=false,lastX=0,lastY=0;
+let mx=-999,my=-999;
+
+cv.addEventListener('mousedown',e=>{dragging=true;lastX=e.clientX;lastY=e.clientY;cv.style.cursor='grabbing';});
+window.addEventListener('mouseup',()=>{dragging=false;cv.style.cursor='grab';});
+window.addEventListener('mousemove',e=>{
+  if(dragging){
+    targetRotY+=(e.clientX-lastX)*0.005;
+    targetRotX+=(e.clientY-lastY)*0.005;
+    targetRotX=Math.max(-1.3,Math.min(1.3,targetRotX));
+    lastX=e.clientX;lastY=e.clientY;
+  }
+});
+cv.addEventListener('wheel',e=>{
+  e.preventDefault();
+  zoom*=(1-e.deltaY*0.001);
+  zoom=Math.max(0.4,Math.min(2.5,zoom));
+},{passive:false});
+cv.addEventListener('mousemove',e=>{
+  const r=cv.getBoundingClientRect();
+  mx=e.clientX-r.left;my=e.clientY-r.top;
+});
+cv.addEventListener('mouseleave',()=>{mx=-999;my=-999;tip.style.display='none';});
+
+let shockTimer=200,shockPower=0;
+function triggerShock(){
+  const types=['BOJ政策決定会合','FRB利上げ観測','決算サプライズ','円介入観測','テック株ラリー','リスクオフ'];
+  const mag=(Math.random()*1.2+0.6)*(Math.random()>0.5?1:-1);
+  shockPower=mag*0.012;
+  evLog.textContent='◇ '+types[Math.floor(Math.random()*types.length)];
+  playShock();
+  setTimeout(()=>{evLog.textContent='— market stable —';},4000);
+}
+
+function project(x,y,z){
+  const cy=Math.cos(rotX),sy=Math.sin(rotX);
+  const y2=y*cy-z*sy;
+  const z2=y*sy+z*cy;
+  const cx=Math.cos(rotY),sx=Math.sin(rotY);
+  const x2=x*cx+z2*sx;
+  const z3=-x*sx+z2*cx;
+  const persp=500/(500+z3);
+  return{x:W/2+x2*persp*zoom,y:H/2+y2*persp*zoom,z:z3,s:persp*zoom};
+}
+
+let clickBudget=0;
+const MINGYO="'Hiragino Mincho ProN','Yu Mincho','YuMincho','MS Mincho',serif";
+
+// === LIVE DATA APPLICATION ===
+// J-Quants取得データをstocksに反映する
+window._applyLiveData=function(result){
+  if(!result||!result.quotes||!result.quotes.length)return;
+  // セクター別の値動き集計（実在の銘柄マッピングがないので、統計的に近似）
+  // 簡易版: 全銘柄の平均変化率をセクター別に適用
+  const codeQuoteMap=new Map();
+  result.quotes.forEach(q=>{
+    const codeRaw=String(q.Code||'');
+    const code=parseInt(codeRaw.slice(0,4));
+    const close=parseFloat(q.AdjustmentClose||q.Close||0);
+    const open=parseFloat(q.AdjustmentOpen||q.Open||close);
+    if(!isNaN(code)&&close>0&&open>0){
+      codeQuoteMap.set(code,{close,open,change:(close-open)/open});
+    }
+  });
+  // セクター別平均変化率
+  const sectorChanges=[0,0,0,0,0,0];
+  const sectorCounts=[0,0,0,0,0,0];
+  // 225銘柄のコードをセクターに振り分け（簡易マッピング）
+  const sectorCodes=[
+    // tech/electric → sector 0 (Technology)
+    [6758,6861,8035,6981,6723,6857,6501,6702,6701,6762,6971,6645,6752,6753,6954,6594,9984,9433,9432,9434,9613,4704,4755,4324,4307,4689,4751,3659,7974,7832,9735,9766,6976,6988,6504,6506,6503,6724,6674,6770,6841,6902,6952],
+    // finance → 1
+    [8306,8316,8411,8604,8601,8750,8766,8725,8630,8308,8795,8331,8332,8354,8355,7182,8253,8304,8309,2768],
+    // auto → 2
+    [7203,7267,7201,7269,7270,7261,7211,7202,7205,7272,6902,5108,5101,6902],
+    // retail/consumer → 3
+    [9983,3382,8267,8233,8252,3086,3099,4661,2413,2432,7911,7912,9602,6178],
+    // industrial → 4
+    [7011,7012,7013,6301,6326,6367,6098,6273,6103,6113,6302,6305,6361,6376,6412,6417,5401,5411,5406,5631,5713,5714,5706,5707,5541,5801,5802,5803,5201,5214,5301,5332,1801,1802,1803,1812,1721,1925,1928,1332,1333,1301,1605,5001,5006,5019,8001,8002,8015,8031,8053,8058,9101,9104,9107,9001,9005,9007,9008,9009,9020,9021,9022,9062,9064,9201,9202,9301,9501,9502,9503,9531,9532,3401,3402,3407,3436,4004,4005,4021,4042,4063,4183,4188,4208],
+    // pharma → 5
+    [4502,4503,4506,4507,4519,4523,4527,4543,4568,4578,4901,4902,2002,2269,2282,2501,2502,2503,2801,2802,2871,2914]
+  ];
+  const codeToSec={};
+  sectorCodes.forEach((codes,si)=>codes.forEach(c=>{codeToSec[c]=si;}));
+
+  codeQuoteMap.forEach((v,code)=>{
+    const si=codeToSec[code];
+    if(si===undefined)return;
+    sectorChanges[si]+=v.change;
+    sectorCounts[si]++;
+  });
+  for(let i=0;i<6;i++){
+    if(sectorCounts[i]>0){
+      sectorChanges[i]/=sectorCounts[i];
+    }
+  }
+  // stocksに反映（セクター平均 + 個別ノイズ）
+  stocks.forEach(s=>{
+    const secAvg=sectorChanges[s.sector];
+    const noise=(Math.random()-0.5)*s.sigma*1.5;
+    const newChange=secAvg+noise;
+    const newPrice=s.anchorPrice*(1+newChange);
+    s.price=newPrice;
+    s.anchorPrice=newPrice; // 実データが来たらアンカーを更新
+    s.basePrice=newPrice;
+    s.change=newChange;
+    s.flashTimer=30;
+  });
+
+  const dateStr=result.date.slice(0,4)+'/'+result.date.slice(4,6)+'/'+result.date.slice(6,8);
+  modeInd.textContent='LIVE · '+codeQuoteMap.size+' quotes · '+dateStr;
+};
+
+let t=0;
+let hoveredStock=null,hoveredSector=-1;
+
+function frame(){
+  t++;
+  rotX+=(targetRotX-rotX)*0.08;
+  rotY+=(targetRotY-rotY)*0.08;
+  if(!dragging) targetRotY+=0.0012;
+
+  shockTimer--;
+  if(shockTimer<=0){triggerShock();shockTimer=500+Math.random()*600;}
+  shockPower*=0.92; // 減衰を早めた (0.96 → 0.92)
+
+  clickBudget=Math.min(clickBudget+0.3,8);
+
+  let idxSum=0,idxBaseSum=0;
+  stocks.forEach(s=>{
+    const prevChange=s.change;
+
+    // ★★★ シミュレーション修正: 平均回帰 + 対称なショック ★★★
+    // 1. 対称なガウスノイズ
+    const noise=(Math.random()-0.5)*s.sigma*0.15;
+
+    // 2. ショックバイアス（対称にする: 0.5〜1.3 → -0.4〜+0.4）
+    const shockContrib=shockPower*(Math.random()*0.8-0.4+1)*0.3;
+    // ↑ shockPowerは既に符号を持っているので、これを軽く拡散させるだけ
+
+    // 3. 平均回帰: アンカー価格から乖離するほど引き戻される
+    const dev=(s.price-s.anchorPrice)/s.anchorPrice;
+    const meanReversion=-dev*0.02;
+
+    const totalChange=noise+shockContrib+meanReversion;
+    // 1tickあたりの変動を±2%に制限
+    const clamped=Math.max(-0.02,Math.min(0.02,totalChange));
+    s.price=Math.max(50,s.price*(1+clamped));
+
+    s.change=(s.price-s.basePrice)/s.basePrice;
+    const delta=s.change-prevChange;
+
+    if(Math.abs(delta)>0.0015&&clickBudget>=1&&Math.random()<0.4){
+      clickBudget--;
+      const pitch=delta>0?1200+Math.random()*400:500+Math.random()*200;
+      const vol=Math.min(0.5,Math.abs(delta)*80);
+      playClick(pitch,vol);
+      s.flashTimer=15;
+    }
+    if(s.flashTimer>0) s.flashTimer--;
+    s.radius=s.baseRadius*(1+s.change*1.5); // 半径膨張も抑えめに (3 → 1.5)
+    s.angle+=s.speed*(1+Math.abs(s.change)*5);
+    idxSum+=s.price;
+    idxBaseSum+=s.basePrice;
+  });
+  indexValue=indexBase*(idxSum/idxBaseSum);
+  indexChange=(indexValue-indexBase)/indexBase;
+  idxVal.textContent='¥ '+Math.round(indexValue).toLocaleString();
+  idxChg.textContent=(indexChange>=0?'+':'')+(indexChange*100).toFixed(2)+'%';
+  idxChg.style.color=indexChange>=0?'#3a6040':'#8a3030';
+
+  ctx.fillStyle='#fafaf7';
+  ctx.fillRect(0,0,W,H);
+
+  hoveredSector=-1;
+  let minD=25;
+  SECTORS.forEach((sec,si)=>{
+    const avgR=140+90+si*6;
+    for(let a=0;a<Math.PI*2;a+=0.15){
+      const x=Math.cos(a)*avgR;
+      const y=Math.sin(sec.tilt)*Math.sin(a)*avgR*0.3;
+      const z=Math.cos(sec.tilt)*Math.sin(a)*avgR;
+      const p=project(x,y,z);
+      const d=Math.hypot(p.x-mx,p.y-my);
+      if(d<minD){minD=d;hoveredSector=si;}
+    }
+  });
+
+  SECTORS.forEach((sec,si)=>{
+    const hl=hoveredSector===si;
+    ctx.strokeStyle=hl?'rgba(0,0,0,0.55)':'rgba(0,0,0,0.1)';
+    ctx.lineWidth=hl?0.8:0.3;
+    for(let rStep=0;rStep<3;rStep++){
+      const r=140+rStep*70+si*6;
+      ctx.beginPath();
+      for(let a=0;a<=Math.PI*2+0.1;a+=0.04){
+        const x=Math.cos(a)*r;
+        const y=Math.sin(sec.tilt)*Math.sin(a)*r*0.3;
+        const z=Math.cos(sec.tilt)*Math.sin(a)*r;
+        const p=project(x,y,z);
+        if(a===0) ctx.moveTo(p.x,p.y); else ctx.lineTo(p.x,p.y);
+      }
+      ctx.stroke();
+    }
+  });
+
+  const towerH=180+indexChange*500+Math.sin(t*0.03)*Math.abs(shockPower)*300;
+  const towerTop=project(0,-towerH,0);
+  const towerBot=project(0,90,0);
+  for(let i=0;i<6;i++){
+    const yy=90-i*(towerH+90)/6;
+    const rr=18-i*2.5;
+    if(rr<=0) continue;
+    ctx.strokeStyle='rgba(0,0,0,0.18)';
+    ctx.lineWidth=0.4;
+    ctx.beginPath();
+    for(let a=0;a<=Math.PI*2+0.1;a+=0.1){
+      const x=Math.cos(a)*rr;
+      const z=Math.sin(a)*rr;
+      const p=project(x,yy,z);
+      if(a===0) ctx.moveTo(p.x,p.y); else ctx.lineTo(p.x,p.y);
+    }
+    ctx.stroke();
+  }
+  ctx.strokeStyle='rgba(0,0,0,0.85)';
+  ctx.lineWidth=1.2;
+  ctx.beginPath();
+  ctx.moveTo(towerBot.x,towerBot.y);
+  ctx.lineTo(towerTop.x,towerTop.y);
+  ctx.stroke();
+  for(let i=1;i<6;i++){
+    const yy=90-i*(towerH+90)/6;
+    const p1=project(-9,yy,0);
+    const p2=project(9,yy,0);
+    const p3=project(0,yy,-9);
+    const p4=project(0,yy,9);
+    ctx.strokeStyle='rgba(0,0,0,0.35)';
+    ctx.lineWidth=0.4;
+    ctx.beginPath();ctx.moveTo(p1.x,p1.y);ctx.lineTo(p2.x,p2.y);ctx.stroke();
+    ctx.beginPath();ctx.moveTo(p3.x,p3.y);ctx.lineTo(p4.x,p4.y);ctx.stroke();
+  }
+  ctx.fillStyle='#000';
+  ctx.beginPath();ctx.arc(towerTop.x,towerTop.y,2.5,0,Math.PI*2);ctx.fill();
+
+  const proj=stocks.map(s=>{
+    const sec=SECTORS[s.sector];
+    // ★ 浮遊オフセット: 低周波の正弦波を複数重ねて、ゆっくり漂う動きを作る
+    const floatR=Math.sin(t*s.fSpeedA+s.fA)*s.fRadAmp
+                +Math.sin(t*s.fSpeedB*0.7+s.fB)*s.fRadAmp*0.4;
+    const floatAng=Math.sin(t*s.fSpeedB+s.fB)*s.fAngAmp
+                  +Math.sin(t*s.fSpeedC*0.8+s.fC)*s.fAngAmp*0.4;
+    const floatTilt=Math.sin(t*s.fSpeedC+s.fC)*s.fTiltAmp
+                   +Math.sin(t*s.fSpeedA*0.6+s.fA)*s.fTiltAmp*0.35;
+
+    const effR=s.radius+floatR;
+    const effAng=s.angle+floatAng;
+    const effTilt=sec.tilt+floatTilt;
+
+    const x=Math.cos(effAng)*effR;
+    const y=Math.sin(effTilt)*Math.sin(effAng)*effR*0.3;
+    const z=Math.cos(effTilt)*Math.sin(effAng)*effR;
+    const p=project(x,y,z);
+    return{s,p};
+  }).sort((a,b)=>b.p.z-a.p.z);
+
+  hoveredStock=null;
+  let closest=14;
+  proj.forEach(({s,p})=>{
+    const intensity=Math.min(1,Math.abs(s.change)*30);
+    const alpha=0.35+intensity*0.55;
+    const shade=s.change>0?Math.floor(20+intensity*40):Math.floor(110+intensity*80);
+    if(s.flashTimer>0){
+      const fa=s.flashTimer/15;
+      ctx.strokeStyle='rgba(0,0,0,'+(fa*0.6)+')';
+      ctx.lineWidth=0.5;
+      ctx.beginPath();
+      ctx.arc(p.x,p.y,Math.max(3,s.size*p.s*1.2+(15-s.flashTimer)*0.8),0,Math.PI*2);
+      ctx.stroke();
+    }
+    ctx.fillStyle='rgba('+shade+','+shade+','+shade+','+alpha+')';
+    ctx.beginPath();
+    ctx.arc(p.x,p.y,Math.max(0.8,s.size*p.s*1.2),0,Math.PI*2);
+    ctx.fill();
+    if(Math.abs(s.change)>0.003){
+      const sec=SECTORS[s.sector];
+      const bx=Math.cos(s.angle)*s.baseRadius;
+      const by=Math.sin(sec.tilt)*Math.sin(s.angle)*s.baseRadius*0.3;
+      const bz=Math.cos(sec.tilt)*Math.sin(s.angle)*s.baseRadius;
+      const bp=project(bx,by,bz);
+      ctx.strokeStyle='rgba(0,0,0,'+(0.15+intensity*0.4)+')';
+      ctx.lineWidth=0.3;
+      ctx.beginPath();ctx.moveTo(bp.x,bp.y);ctx.lineTo(p.x,p.y);ctx.stroke();
+    }
+    const d=Math.hypot(p.x-mx,p.y-my);
+    if(d<closest){closest=d;hoveredStock=s;}
+  });
+
+  // 明朝体ラベル
+  const labeled=[];
+  proj.forEach(({s,p})=>{
+    if(p.z<-50) return;
+    if(p.s<0.7) return;
+    let tooClose=false;
+    for(const l of labeled){
+      if(Math.hypot(l.p.x-p.x,l.p.y-p.y)<55){tooClose=true;break;}
+    }
+    if(tooClose) return;
+    if(s.size<2.1 && Math.abs(s.change)<0.005 && s.flashTimer===0) return;
+    labeled.push({s,p});
+  });
+
+  labeled.forEach(({s,p})=>{
+    const fontSize=Math.max(9,Math.min(13,10*p.s));
+    const dx=(p.x>W/2)?8:-8;
+    const align=(p.x>W/2)?'left':'right';
+    ctx.strokeStyle='rgba(0,0,0,0.25)';
+    ctx.lineWidth=0.3;
+    ctx.beginPath();
+    ctx.moveTo(p.x+(dx>0?2:-2),p.y);
+    ctx.lineTo(p.x+dx,p.y);
+    ctx.stroke();
+    ctx.font=fontSize+"px "+MINGYO;
+    ctx.fillStyle='rgba(0,0,0,0.82)';
+    ctx.textAlign=align;
+    ctx.fillText(s.name,p.x+dx,p.y-1);
+    ctx.font=(fontSize-2)+"px "+MINGYO;
+    ctx.fillStyle=s.change>=0?'rgba(0,0,0,0.6)':'rgba(80,80,80,0.65)';
+    const priceStr='¥'+Math.round(s.price).toLocaleString()+' '+(s.change>=0?'+':'')+(s.change*100).toFixed(2)+'%';
+    ctx.fillText(priceStr,p.x+dx,p.y+fontSize+1);
+  });
+
+  // 注釈
+  const ann=[
+    {angle:0.3,text:'SECTOR 01 / TECH'},
+    {angle:1.1,text:'VOL 0.47'},
+    {angle:2.0,text:'σ = 0.0128'},
+    {angle:2.9,text:'FINANCIAL'},
+    {angle:3.8,text:'AUTO CLUSTER'},
+    {angle:4.7,text:'LIQUIDITY'},
+    {angle:5.5,text:'INDUSTRIAL'}
+  ];
+  ctx.font='8px monospace';
+  ctx.fillStyle='rgba(0,0,0,0.55)';
+  ctx.strokeStyle='rgba(0,0,0,0.22)';
+  ctx.lineWidth=0.3;
+  ann.forEach(a=>{
+    const ix=Math.cos(a.angle)*310;
+    const iz=Math.sin(a.angle)*310;
+    const ip=project(ix,0,iz);
+    const ox=Math.cos(a.angle)*380;
+    const oz=Math.sin(a.angle)*380;
+    const op=project(ox,0,oz);
+    ctx.beginPath();ctx.moveTo(ip.x,ip.y);ctx.lineTo(op.x,op.y);ctx.stroke();
+    ctx.beginPath();ctx.arc(op.x,op.y,1.5,0,Math.PI*2);ctx.fill();
+    const right=op.x>W/2;
+    ctx.textAlign=right?'left':'right';
+    ctx.fillText(a.text,op.x+(right?6:-6),op.y+3);
+  });
+
+  if(hoveredStock){
+    const s=hoveredStock;
+    tip.innerHTML='<div style="font-weight:500;font-family:'+MINGYO+';font-size:12px;">'+s.name+'</div>'+
+      '<div style="color:#666">'+s.code+' · '+SECTORS[s.sector].name+'</div>'+
+      '<div style="font-family:'+MINGYO+';">¥ '+Math.round(s.price).toLocaleString()+' ('+(s.change*100).toFixed(2)+'%)</div>';
+    tip.style.display='block';
+    tip.style.left=Math.min(mx+12,W-180)+'px';
+    tip.style.top=Math.min(my+12,H-60)+'px';
+  } else if(hoveredSector>=0){
+    const sec=SECTORS[hoveredSector];
+    const ss=stocks.filter(x=>x.sector===hoveredSector);
+    const avg=ss.reduce((a,b)=>a+b.change,0)/ss.length;
+    tip.innerHTML='<div style="font-weight:500">'+sec.name+'</div>'+
+      '<div style="color:#666">'+sec.count+' stocks</div>'+
+      '<div>avg: '+(avg*100).toFixed(2)+'%</div>';
+    tip.style.display='block';
+    tip.style.left=Math.min(mx+12,W-140)+'px';
+    tip.style.top=Math.min(my+12,H-60)+'px';
+  } else {
+    tip.style.display='none';
+  }
+
+  requestAnimationFrame(frame);
+}
+frame();
+}
+if(document.readyState==='loading'){
+  document.addEventListener('DOMContentLoaded',init);
+} else {
+  init();
+}
+})();
+</script>
+</body>
+</html>
